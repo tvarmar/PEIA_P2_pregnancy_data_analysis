@@ -1,0 +1,400 @@
+---
+title: "Análisis de datos de embarazadas y parámetros de laboratorio" 
+subtitle: "Ejercicio de feedback — Análisis descriptivo en R" 
+author: "Tania Évora Vargas Martínez" 
+date: today
+lang: es
+
+format: 
+  html:
+    theme: lux
+    toc: true
+    toc-depth: 2
+    toc-title: "Contenido"
+    number-sections: true
+    smooth-scroll: true
+    highlight-style: github
+    fig-align: center
+    df-print: kable
+    embed-resources: true
+
+execute:
+  echo: true
+  warning: false
+  message: false
+
+editor: visual
+---
+
+## Introducción
+
+En este informe se integran y analizan dos conjuntos de datos relacionados con mujeres embarazadas: uno con información demográfica y del embarazo, y otro con parámetros de laboratorio. El objetivo es limpiar, transformar y analizar los datos, así como responder a las preguntas clínicas planteadas.
+
+## Configuración inicial
+
+En esta sección se realiza la configuración del entorno. Se cargan las librerías necesarias, y se define la paleta de colores y el tema de las gráficas para mantener una estética coherente.
+
+```{r}
+library(readxl)
+library(dplyr)
+library(janitor)
+library(tidyr)
+library(ggplot2)
+library(gtsummary)
+
+# Paleta de colores
+colores <- c("#78c2ad", "#f3969a", "#6cc3d5", "#ffce67", "#ff7851")
+color_principal <- colores[1]
+color_secundario <- colores[2]
+
+# Tema para consistencia visual
+tema_informe <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, color = "#333333"),
+    plot.subtitle = element_text(color = "gray50", size = 11),
+    axis.title = element_text(face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+```
+
+## Carga y unión de datos
+
+Los datos utilizados provienen de un archivo Excel con tres pestañas: demográficos, biomarcadores y diccionario de datos. En esta sección se cargan los dos primeros conjuntos y se unen mediante un identificador común.
+
+```{r}
+ruta_datos <- "datos/embarazadas.xlsx"
+
+# Carga datos demográficos
+demografico <- read_excel(ruta_datos, sheet = 1) %>%
+  clean_names()
+
+# Carga datos de biomarcadores
+laboratorio <- read_excel(ruta_datos, sheet = 2) %>%
+  clean_names()
+```
+
+Una vez cargados los datos y estandarizado los nombres de las variables, se comprueban las columnas de ambos conjuntos para identificar el campo común que permite su unión.
+
+```{r}
+colnames(demografico)
+
+colnames(laboratorio)
+```
+
+Tras revisar los nombres de las variables, se identifica la columna `codigo` como el identificador común del paciente presente en ambos conjuntos de datos. Con este identificador se realiza la unión de los conjuntos. <br> Se utiliza una unión de tipo `left_join`, tomando como referencia el conjunto de demográficos, con el fin de conservar todos los registros disponibles y poder identificar posteriormente aquellas mujeres que **no** disponen de datos de laboratorio (biomarcadores).
+
+```{r}
+datos <- demografico %>%
+  left_join(laboratorio, by="codigo")
+```
+
+## Limpieza y preparación de datos
+
+En esta sección se preparan los datos para su posterior análisis. En concreto, se eliminan los registros sin información de laboratorio, se realiza un análisis descriptivo básico para detectar valores atípicos y se recodifican las variables categóricas de acuerdo al diccionario de datos proporcionado.
+
+### Eliminación de registros sin datos de laboratorio
+
+Dado que la unión de los conjuntos se realizó mediante `left_join`, el conjunto resultante puede incluir información de mujeres con datos demográficos pero sin datos de laboratorio.
+
+```{r}
+# Variables de laboratorio
+vars_laboratorio <- laboratorio %>% select(-codigo) %>% colnames()
+
+# Nº de registros sin datos de laboratorio
+datos %>%
+  filter(if_all(all_of(vars_laboratorio), is.na)) %>%
+  nrow()
+```
+
+En concreto, se identifican 29 registros que no cuentan con información de biomarcadores, que se eliminan a continuación.
+
+```{r}
+datos <- datos %>%
+  filter(!if_all(all_of(vars_laboratorio), is.na))
+```
+
+### Análisis exploratorio y tratamiento de valores extraños
+
+A continuación se realiza un análisis descriptivo básico de las variables con el objetivo de evaluar su ditribución, detectar valores atípicos y faltantes.
+
+```{r}
+summary(datos)
+```
+
+El análisis muestra que, en general, las variables demográficas presentan rangos coherentes con lo esperado. Sin embargo, en algunas variables de tipo biológico se observan valores extremos muy alejados del patrón general de los datos, como ocurre en `colesterol_total` y `ldl`, así como valores inusuales en variables como `hemoglobina` y `trigliceridos`. Por otro lado, se identifica varianza constante en la variable `responde`.
+
+Para facilitar la identificación de estos comportamientos, se representan las variables numéricas también visualmente.
+
+```{r}
+#| fig-width: 14 
+#| fig-height: 20
+vars_numericas <- datos %>%
+  select(where(is.numeric)) %>%
+  colnames()
+# Visualizar con boxplots
+datos %>% 
+  select(all_of(vars_numericas)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "valor") %>%
+  ggplot(aes(y = valor)) +
+  geom_boxplot(fill = color_principal, alpha = 0.7) +
+  facet_wrap(~ variable, scales = "free", ncol = 4) +
+  tema_informe +
+  labs(title = "Distribución de variables numéricas",
+       subtitle = "Identificación de valores atípicos")
+```
+
+Según lo observado en los boxplots, se confirma la presencia de valores extremos comentados previamente. Además, se identifican variables que deberían ser categóricas o binarias pero que aparecen codificadas como numéricas. Este comportamento se observa, por ejemplo, en `lactancia_en_embarazo_anterior`, `gine_publico`, `gine_privado` o `clases_de_parto`, donde los gráficos muestran únicamente unos pocos valores discretos. <br> Dado que las variables binarias o categóricas codificadas no presentan una distribución continua, no es apropiado aplicar criterios de detección de outliers basados en rangos intercuartílicos, por lo que no se realiza este tratamiento en dichos casos. Estas variables serán recodificadas posteriormente según el diccionario de datos. <br> Se observa un caso particular en `biberon`, que según el diccionario debería tomar únicamente valores 0 y 1, pero presenta valores fuera de rango. Estos valores se consideran inconsistentes y por tanto se recodifican como perdidos. <br> Para el resto de variables continuas, se aplica la detección de valores atípicos mediante el criterio de *Tukey (1.5 veces el rango intercuartílico)*, sustituyendo los valores identificado por NA. Este método es adecuado para variables continuas, ya que permite identificar observaciones alejadas del patrón general. <br> También se detectó un valor de `triglicéridos` igual a cero. Aunque resulta inusual desde el punto de vista clínico, no se eliminó, ya que no se considera un outlier según el criterio aplicado y no se dispone de confirmación experta que indique que se trata de un error de registro.
+
+```{r}
+#| fig-width: 14 
+#| fig-height: 20
+limpiar_outliers <- function(x) {
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  inf <- q1 - 1.5 * iqr
+  sup <- q3 + 1.5 * iqr
+  x[x < inf | x > sup] <- NA
+  x
+}
+
+vars_a_limpiar <- c("colesterol_total", "creatinina", "glucosa", "hdl", "hemoglobina",  "ldl", "tension_arterial_media", "trigliceridos")
+
+datos <- datos %>%
+  mutate(
+    biberon = ifelse(biberon > 1, NA, biberon),
+    across(all_of(vars_a_limpiar), limpiar_outliers)
+  )
+
+# Visualizar con boxplots
+datos %>% 
+  select(all_of(vars_numericas)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "valor") %>%
+  ggplot(aes(y = valor)) +
+  geom_boxplot(fill = color_principal, alpha = 0.7) +
+  facet_wrap(~ variable, scales = "free", ncol = 4) +
+  tema_informe +
+  labs(title = "Distribución de variables numéricas tras limpieza",
+       subtitle = "Valores atípicos tratados como datos perdidos")
+```
+
+### Recodificación de variables categóricas
+
+Una vez tratados los valores atípicos, se recodifican las variables categóricas para asignar las etiquetas apropiadas según el diccionario de datos. Antes de recodificar, se comprueban los valores únicos de las variables de tipo "Sí/No" almacenadas como texto, para detectar posibles errores de escritura. Las demás variables categóricas no requieren esta comprobación, ya que están codificadas numéricamente o corresponden a texto libre.
+
+```{r}
+vars_si_no <- c("lactancia_materna", "otro_tipo_de_lactancia")
+vars_01 <- c("responde", "lactancia_en_embarazo_anterior", "gine_publico", "gine_privado", "clases_de_parto", "cesarea", "biberon", "pareja")
+# Comprobación de valores únicos
+datos %>% 
+  select(all_of(vars_si_no)) %>% 
+  lapply(unique)
+# Recodificación                                        
+datos <- datos %>%
+  mutate(
+    across(all_of(vars_01), ~ factor(.x, levels = c(0, 1), labels = c("No", "Sí"))),
+    across(all_of(vars_si_no), ~ factor(.x, levels = c("No", "Si"), labels = c("No", "Sí"))),
+    nacional = factor(nacional, 
+                      levels = c(1, 2, 3), labels = c("española", "extranjera", "otras o no consta")),
+    profesion = factor(profesion, 
+                       levels = c(1, 2, 3, 4, 5), labels = c("Enfermera", "Oficina", "Médico", "Profesora", "Otros")),
+    nivel_de_estudios = factor(nivel_de_estudios, 
+                               levels = c(1, 2, 3, 4, 5, 6), 
+                               labels = c("Primaria", "Secundaria", "Bachiller", "Grado", "Máster", "Doctorado o más")),
+    situacion_laboral_pareja = factor(situacion_laboral_pareja, 
+                                      levels = c(1, 2, 3, 4, 5), 
+                                      labels = c("Activa", "Parada", "Baja", "Jubilado", "Estudiante"))
+  )
+```
+
+A continuación, se muestra un resumen de las variables categóricas resultantes
+
+```{r}
+#| fig-width: 16 
+#| fig-height: 20
+datos %>%
+  select(where(is.factor)) %>%
+  summary()
+
+datos %>% 
+  select(where(is.factor)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "valor") %>%
+  ggplot(aes(y = valor)) +
+  geom_bar(fill = color_principal, alpha = 0.8) +
+  facet_wrap(~ variable, scales = "free", ncol = 4) +
+  tema_informe +
+  labs(title = "Distribución de variables categóricas", x = "Frecuencia")
+```
+
+## Creación de variables
+
+En esta sección se crean las nuevas variables solicitadas, para facilitar el análisis. En primer lugar, se calcula una estimación del colesterol total a partir de los biomarcadores, utilizando la formula: $Colesterol total = LDL + HDL + (Triglicéridos / 5)$. Dado que el conjunto de datos ya contiene la variables de `colesterol_total`, se opta por crear una nueva variables derivada `colesterol_total_est`, manteniendo la original.
+
+```{r}
+datos <- datos %>%
+  mutate(
+    colesterol_total_est = ldl + hdl + (trigliceridos / 5)
+  )
+```
+
+En segundo lugar, se crea una nueva variables `ginecologo` de seguimiento ginecológico a partir de las variables `gine_publico` y `gine_privado`.
+
+| gine_publico | gine_privado | ginecologo        |
+|--------------|--------------|-------------------|
+| Sí           | No           | Público           |
+| No           | Sí           | Privado           |
+| Sí           | Sí           | Público y privado |
+| No           | No           | NA                |
+
+```{r}
+datos <- datos %>%
+  mutate(
+    ginecologo = case_when(
+      gine_publico == "Sí" & gine_privado == "No" ~ "Público",
+      gine_publico == "No" & gine_privado == "Sí" ~ "Privado",
+      gine_publico == "Sí" & gine_privado == "Sí" ~ "Público y privado",
+      TRUE ~ NA_character_
+    ),
+    ginecologo = factor(ginecologo, levels = c("Público", "Privado", "Público y privado"))
+  )
+```
+
+A continuación se muestra la distribución de mujeres según el tipo de seguimiento ginecológico:
+
+```{r}
+# Distribución de seguimiento ginecológico
+datos %>%
+  count(ginecologo) %>%
+  mutate(
+    porcentaje = round(100 * n / sum(n), 2)
+  )
+```
+
+La mayoría de las mujeres realizan su seguimiento ginecológico en el sistema público. Un pequeño porcentaje combina ambos tipos de seguimiento.
+
+## Análisis descriptivo y visualización de resultados
+
+En primer lugar, se presenta una tabla descriptiva de las variables en estudio. Para las variables continuas, se muestra la media y la desviación estándar; mientras que para las variables categóricas se inidican las frecuencias absolutas y relativas. En este análisis no se incluyen las variables de ID de paciente, la fecha y los campos de texto libre.
+
+```{r}
+vars_excluir <- c("codigo", "fecha_de_nacimiento", "area_de_salud", "hospital", "ocupacion_habitual_pareja")
+# Variables continuas (numéricas)
+vars_continuas <- datos %>%
+  select(where(is.numeric)) %>%
+  select(-any_of(vars_excluir)) %>%
+  colnames()
+# Variables factor (categóricas y binarias)
+vars_categoricas <- datos %>%
+  select(where(is.factor)) %>%
+  select(-any_of(vars_excluir)) %>%
+  colnames()
+# Tabla descriptiva 
+datos %>% 
+  select(all_of(c(vars_continuas, vars_categoricas))) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 2
+  )
+```
+
+A continuación, se representan los parámetros de laboratorio mediante histogramas, para evaluar su distribución y detectar posibles asímetrías o valores anómalos.
+
+```{r}
+#| fig-width: 14 
+#| fig-height: 14
+datos %>%
+  select(all_of(c(vars_laboratorio, "colesterol_total_est"))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "valor") %>%
+  ggplot(aes(x = valor)) +
+  geom_histogram(bins = 30, fill = color_principal, color = "white", alpha = 0.8) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  tema_informe +
+  labs(title = "Distribución de parámetros de laboratorio",
+       subtitle = "Evaluación de la forma de las distribuciones",
+       x = "Valor", y = "Frecuencia")
+```
+
+Estos histogramas muestran que la mayoría de los parámetros de laboratorio siguen distribuciones que se aproximan a la normal. La variable `trigliceridos` es la que más se desvía respecto a estre patrón, con una ligera asimetría positiva hacia la derecha. Las distribuciones de colesterol total, observado y calculado, resultan muy similares. <br> En el caso de los `trigliceridos` se observa la presencia de un valor igual a cero, que se aleja del resto de observaciones. Aunque este valor resulta llamativo y podría deberse a un error de registro, no se considera suficientemente extremo como para ser eliminado sin confirmación experta.
+
+### Sobre cesáreas
+
+A continuación se analizan y responden las preguntas planteadas respecto a cesáreas.
+
+#### ¿Cuál es el porcentaje de cesáreas en la muestra?
+
+```{r}
+datos %>%
+  summarise(
+    porcentaje_cesareas = round(
+      100 * mean(cesarea == "Sí", na.rm = TRUE),
+      2
+    )
+  )
+```
+
+#### ¿Cuál es la media de edad de las mujeres con cesárea y cuál es la media de edad de las mujeres sin cesárea?
+
+```{r}
+datos %>%
+  group_by(cesarea) %>%
+  summarise(
+    media_edad = round(mean(edad_de_la_madre, na.rm = TRUE), 2)
+  )
+```
+
+#### Un gráfico de cajas para la edad, separado por si la mujer tuvo o no cesárea.
+
+```{r}
+ggplot(datos, aes(x = cesarea, y = edad_de_la_madre, fill = cesarea)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_fill_manual(values = c(color_principal, color_secundario)) +
+  tema_informe +
+  labs(
+    title = "Distribución de edad según tipo de parto",
+    subtitle = "Comparación entre parto natural y cesárea",
+    x = "Cesárea",
+    y = "Edad de la madre (años)",
+    fill = "Cesárea"
+  )
+```
+
+#### De las mujeres que asistieron a clases de parto, ¿qué porcentaje tuvo cesárea?
+
+```{r}
+datos %>%
+  filter(clases_de_parto == "Sí") %>%
+  summarise(
+    porcentaje_cesareas = round(
+      100 * mean(cesarea == "Sí", na.rm = TRUE),
+      2
+    )
+  )
+```
+
+### Relación entre peso materno y tensión arterial
+
+Un gráfico de dispersión que muestre la relación entre el peso de la madre y la tensión arterial y que incluya la línea de regresión.
+
+```{r}
+ggplot(datos, aes(x = peso_de_la_madre, y = tension_arterial_media)) +
+  geom_point(alpha = 0.6, color = color_principal) +
+  geom_smooth(method = "lm", se = TRUE, color = color_secundario, fill = color_secundario, alpha = 0.2) +
+  tema_informe +
+  labs(
+    title = "Relación entre peso y tensión arterial",
+    subtitle = "Línea de regresión lineal con intervalo de confianza",
+    x = "Peso de la madre (kg)",
+    y = "Tensión arterial media (mmHg)"
+  )
+```
+
+## Conclusiones
+
+A lo largo del análisis se llevó a cabo la integración, limpieza y exploración de un conjunto de datos con información de mujeres embarazadas. Durante el proceso de preparación se identificaron registros sin biomarcadores y valores extraños, que fueron tratados para garantizar la consistencia del conjunto final. Las variables demográficas mostraron distribuciones coherentes con lo esperado en una población de mujeres embarazadas. En cuanto a los biomarcadores, la mayoría presentaron distribuciones próximas a la normalidad, con la excepción de los triglicéridos, que mostraron una ligera asimetría positiva y un valor igual a cero que, aunque llamativo, no se eliminó por falta de evidencia para considerarlo un error de registro. La comparación entre el colesterol total observado y el estimado a partir de LDL, HDL y triglicéridos mostró resultados muy similares, lo que respalda la coherencia de los datos.
+
+Respecto al seguimiento ginecológico, la mayoría de las mujeres realizaron el control del embarazo en el sistema público, mientras que un porcentaje reducido acudió a un ginecólogo privado o combinó ambos tipos de atención. En relación con las cesáreas, el 20.88% de los partos de la muestra fueron por esta vía. Las mujeres que tuvieron cesárea presentaron una media de edad ligeramente superior a aquellas con parto sin cesárea, aunque la distribución de edad muestra solapamiento entre ambos grupos. Entre las mujeres que asistieron a clases de preparación al parto, el porcentaje de cesáreas fue similar al de la muestra total, lo que sugiere que la asistencia a clases no se asocia con una menor probabilidad de cesárea. Finalmente, el análisis de la relación entre el peso materno y la tensión arterial mostró una tendencia positiva, observándose valores más elevados de tensión arterial media a medida que aumenta el peso de la madre.
